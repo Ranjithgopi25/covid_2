@@ -706,6 +706,17 @@ export class ChatEditWorkflowService {
 
     const normalizedEditorIds = normalizeEditorOrder(selectedIds);
 
+    // Initialize sequential mode if multiple editors are selected (like Guided Journey)
+    if (normalizedEditorIds.length > 1) {
+      this.updateState({
+        ...this.currentState,
+        isSequentialMode: true,
+        totalEditors: normalizedEditorIds.length,
+        currentEditorIndex: 0,
+        isLastEditor: false
+      });
+    }
+
     let fullResponse = '';
     let combinedFeedback = '';
     let finalRevisedContent = '';
@@ -775,9 +786,28 @@ export class ChatEditWorkflowService {
           
           // Store current editor info
           if (data.current_editor) {
-            const editorIndex = data.editor_index || 0;
+            // Backend sends editor_index as 0-based, but we need to handle both 0-based and 1-based
+            // If editor_index is missing, we can't determine position, so use 0 as default
+            let editorIndex = data.editor_index !== undefined && data.editor_index !== null ? data.editor_index : 0;
             const totalEditors = data.total_editors || normalizedEditorIds.length;
-            const isLastEditor = editorIndex >= totalEditors - 1;
+            
+            // Ensure editorIndex is 0-based for comparison (if backend sends 1-based, convert it)
+            // Compare: if editorIndex is >= totalEditors, it might be 1-based, so subtract 1
+            if (editorIndex > 0 && editorIndex >= totalEditors) {
+              editorIndex = editorIndex - 1; // Convert 1-based to 0-based
+            }
+            
+            // isLastEditor: 0-based index comparison (if index is last valid index, it's the last editor)
+            // For 3 editors (indices 0, 1, 2), last editor is at index 2
+            const isLastEditor = editorIndex >= (totalEditors - 1);
+            
+            console.log('[ChatEditWorkflow] Editor index calculation:', {
+              editor_index: data.editor_index,
+              normalizedIndex: editorIndex,
+              totalEditors,
+              isLastEditor,
+              currentEditor: data.current_editor
+            });
             
             stateUpdates.currentEditor = data.current_editor;
             stateUpdates.currentEditorIndex = editorIndex;
@@ -789,6 +819,10 @@ export class ChatEditWorkflowService {
             if (totalEditors > 1) {
               stateUpdates.isSequentialMode = true;
             }
+          } else if (normalizedEditorIds.length > 1) {
+            // Even if current_editor is not provided yet, set sequential mode if multiple editors
+            stateUpdates.isSequentialMode = true;
+            stateUpdates.totalEditors = normalizedEditorIds.length;
           }
           
           // Apply state updates if any
@@ -1377,7 +1411,37 @@ export class ChatEditWorkflowService {
   
   /** Check if all paragraphs have been decided */
   get allParagraphsDecided(): boolean {
-    return allParagraphsDecided(this.currentState.paragraphEdits);
+    // First check paragraph-level approvals using utility function
+    const paragraphsDecided = allParagraphsDecided(this.currentState.paragraphEdits);
+    
+    if (!paragraphsDecided) {
+      return false;
+    }
+    
+    // Then check if all editorial feedback items are decided (like Guided Journey)
+    if (!this.currentState.paragraphEdits || this.currentState.paragraphEdits.length === 0) {
+      return true; // No paragraphs to check
+    }
+    
+    return this.currentState.paragraphEdits.every(para => {
+      // Check if paragraph itself is decided (already checked above, but ensure consistency)
+      if (para.approved === null || para.approved === undefined) {
+        return false;
+      }
+      
+      // Check if all editorial feedback items are decided
+      const feedbackTypes = Object.keys(para.editorial_feedback || {});
+      for (const editorType of feedbackTypes) {
+        const feedbacks = (para.editorial_feedback as any)[editorType] || [];
+        for (const fb of feedbacks) {
+          if (fb.approved === null || fb.approved === undefined) {
+            return false;
+          }
+        }
+      }
+      
+      return true;
+    });
   }
 
   /** Get paragraphs that require user review (excludes auto-approved) */
@@ -1676,9 +1740,25 @@ export class ChatEditWorkflowService {
 
                   // Store current editor info
                   if (data.current_editor) {
-                    const editorIndex = data.editor_index || 0;
-                    const totalEditors = data.total_editors || this.currentState.totalEditors;
-                    const isLastEditor = editorIndex >= totalEditors - 1;
+                    // Backend sends editor_index as 0-based, but we need to handle both 0-based and 1-based
+                    let editorIndex = data.editor_index !== undefined && data.editor_index !== null ? data.editor_index : 0;
+                    const totalEditors = data.total_editors || this.currentState.totalEditors || this.currentState.selectedEditors.length;
+                    
+                    // Ensure editorIndex is 0-based for comparison (if backend sends 1-based, convert it)
+                    if (editorIndex > 0 && editorIndex >= totalEditors) {
+                      editorIndex = editorIndex - 1; // Convert 1-based to 0-based
+                    }
+                    
+                    // isLastEditor: 0-based index comparison
+                    const isLastEditor = editorIndex >= (totalEditors - 1);
+                    
+                    console.log('[ChatEditWorkflow] Next editor - Editor index calculation:', {
+                      editor_index: data.editor_index,
+                      normalizedIndex: editorIndex,
+                      totalEditors,
+                      isLastEditor,
+                      currentEditor: data.current_editor
+                    });
                     
                     stateUpdates.currentEditor = data.current_editor;
                     stateUpdates.currentEditorIndex = editorIndex;
