@@ -706,16 +706,14 @@ export class ChatEditWorkflowService {
 
     const normalizedEditorIds = normalizeEditorOrder(selectedIds);
 
-    // Initialize sequential mode if multiple editors are selected (like Guided Journey)
-    if (normalizedEditorIds.length > 1) {
-      this.updateState({
-        ...this.currentState,
-        isSequentialMode: true,
-        totalEditors: normalizedEditorIds.length,
-        currentEditorIndex: 0,
-        isLastEditor: false
-      });
-    }
+    // Initialize totalEditors before stream starts (like Guided Journey)
+    // Sequential mode will be determined by backend via thread_id in editor_complete event
+    this.updateState({
+      ...this.currentState,
+      totalEditors: normalizedEditorIds.length,
+      currentEditorIndex: 0,
+      isLastEditor: false
+    });
 
     let fullResponse = '';
     let combinedFeedback = '';
@@ -814,15 +812,11 @@ export class ChatEditWorkflowService {
             stateUpdates.totalEditors = totalEditors;
             stateUpdates.isLastEditor = isLastEditor;
             
-            // CRITICAL FIX: If we have multiple editors (> 1), it's sequential mode
-            // even if thread_id hasn't arrived yet
+            // CRITICAL FIX: If we have multiple editors (> 1) and current_editor info,
+            // it means sequential processing is happening (like Guided Journey)
             if (totalEditors > 1) {
               stateUpdates.isSequentialMode = true;
             }
-          } else if (normalizedEditorIds.length > 1) {
-            // Even if current_editor is not provided yet, set sequential mode if multiple editors
-            stateUpdates.isSequentialMode = true;
-            stateUpdates.totalEditors = normalizedEditorIds.length;
           }
           
           // Apply state updates if any
@@ -875,13 +869,14 @@ export class ChatEditWorkflowService {
               const autoApproved = edit.autoApproved !== undefined ? edit.autoApproved : isIdentical;
               const approved = autoApproved ? true : (edit.approved !== undefined ? edit.approved : null);
               
-              const editorial_feedback = edit.editorial_feedback ? {
-                development: edit.editorial_feedback.development || [],
-                content: edit.editorial_feedback.content || [],
-                copy: edit.editorial_feedback.copy || [],
-                line: edit.editorial_feedback.line || [],
-                brand: edit.editorial_feedback.brand || []
-              } : undefined;
+              // Process editorial_feedback with same structure as Guided Journey (always include all editor types)
+              const editorial_feedback = {
+                development: edit.editorial_feedback?.development || [],
+                content: edit.editorial_feedback?.content || [],
+                copy: edit.editorial_feedback?.copy || [],
+                line: edit.editorial_feedback?.line || [],
+                brand: edit.editorial_feedback?.brand || []
+              };
               
               return {
                 index: paragraphIndex,
@@ -892,7 +887,9 @@ export class ChatEditWorkflowService {
                 approved: approved,
                 editorial_feedback: editorial_feedback,
                 displayOriginal: originalText,
-                displayEdited: editedText
+                displayEdited: editedText,
+                block_type: (edit.block_type || 'paragraph') as any,
+                level: (edit.level || 0) as any
               } as ParagraphEdit;
             });
             
@@ -1001,14 +998,14 @@ export class ChatEditWorkflowService {
               const autoApproved = edit.autoApproved !== undefined ? edit.autoApproved : isIdentical;
               const approved = autoApproved ? true : (edit.approved !== undefined ? edit.approved : null);
 
-              // Preserve editorial_feedback from backend (same structure as guided journey)
-              const editorial_feedback = edit.editorial_feedback ? {
-                development: edit.editorial_feedback.development || [],
-                content: edit.editorial_feedback.content || [],
-                copy: edit.editorial_feedback.copy || [],
-                line: edit.editorial_feedback.line || [],
-                brand: edit.editorial_feedback.brand || []
-              } : undefined;
+              // Process editorial_feedback with same structure as Guided Journey (always include all editor types)
+              const editorial_feedback = {
+                development: edit.editorial_feedback?.development || [],
+                content: edit.editorial_feedback?.content || [],
+                copy: edit.editorial_feedback?.copy || [],
+                line: edit.editorial_feedback?.line || [],
+                brand: edit.editorial_feedback?.brand || []
+              };
 
               return {
                 index: paragraphIndex,
@@ -1019,7 +1016,9 @@ export class ChatEditWorkflowService {
                 approved: approved,
                 editorial_feedback: editorial_feedback,
                 displayOriginal: originalText,
-                displayEdited: editedText
+                displayEdited: editedText,
+                block_type: (edit.block_type || 'paragraph') as any,
+                level: (edit.level || 0) as any
               } as ParagraphEdit;
             });
           } else if (data.final_revised && data.original_content) {
@@ -1815,13 +1814,14 @@ export class ChatEditWorkflowService {
                       const autoApproved = edit.autoApproved !== undefined ? edit.autoApproved : isIdentical;
                       const approved = autoApproved ? true : (edit.approved !== undefined ? edit.approved : null);
                       
-                      const editorial_feedback = edit.editorial_feedback ? {
-                        development: edit.editorial_feedback.development || [],
-                        content: edit.editorial_feedback.content || [],
-                        copy: edit.editorial_feedback.copy || [],
-                        line: edit.editorial_feedback.line || [],
-                        brand: edit.editorial_feedback.brand || []
-                      } : undefined;
+                      // Process editorial_feedback with same structure as Guided Journey (always include all editor types)
+                      const editorial_feedback = {
+                        development: edit.editorial_feedback?.development || [],
+                        content: edit.editorial_feedback?.content || [],
+                        copy: edit.editorial_feedback?.copy || [],
+                        line: edit.editorial_feedback?.line || [],
+                        brand: edit.editorial_feedback?.brand || []
+                      };
                       
                       return {
                         index: paragraphIndex,
