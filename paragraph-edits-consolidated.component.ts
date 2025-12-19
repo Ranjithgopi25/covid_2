@@ -1,4 +1,4 @@
-import { Component, Input, Output, EventEmitter, OnChanges, SimpleChanges } from '@angular/core';
+import { Component, Input, Output, EventEmitter, OnChanges, ChangeDetectorRef } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { ParagraphEdit } from '../../../../core/models/message.model';
 import { allParagraphsDecided } from '../../../../core/utils/paragraph-edit.utils';
@@ -85,7 +85,7 @@ type ParagraphFeedback = ParagraphEdit & {
                 <div class="paragraph-box paragraph-box-original">
                   <h5>Original</h5>
                   <div class="paragraph-text-box"
-                    [innerHTML]="highlightAllFeedbacks(paragraph).original">
+                    [innerHTML]="paragraph.displayOriginal ? paragraph.displayOriginal : highlightAllFeedbacks(paragraph).original">
                   </div>
                 </div>
                 <div class="paragraph-box paragraph-box-edited"
@@ -93,7 +93,7 @@ type ParagraphFeedback = ParagraphEdit & {
                   [class.declined-box]="paragraph.approved === false">
                   <h5>Edited</h5>
                   <div class="paragraph-text-box"
-                    [innerHTML]="highlightAllFeedbacks(paragraph).edited"
+                    [innerHTML]="paragraph.displayEdited ? paragraph.displayEdited : highlightAllFeedbacks(paragraph).edited"
                     [class.declined-text]="paragraph.approved === false">
                   </div>
                 </div>
@@ -141,10 +141,10 @@ type ParagraphFeedback = ParagraphEdit & {
                                 <div class="ef-actions">
                                   <button class="ef-approve-btn"
                                     (click)="applyEditorialFix(paragraph, editorType, fb); $event.stopPropagation()"
-                                  [disabled]="showFinalOutput">✓ Approve</button>
+                                  [disabled]="fb.approved === true || showFinalOutput">✓ Approve</button>
                                   <button class="ef-reject-btn"
                                     (click)="rejectEditorialFeedback(paragraph, editorType, fb); $event.stopPropagation()"
-                                  [disabled]="showFinalOutput">✗ Reject</button>
+                                  [disabled]="fb.approved === false || showFinalOutput">✗ Reject</button>
                                 </div>
                               }
                               @if (fb.approved === true) {
@@ -174,55 +174,30 @@ type ParagraphFeedback = ParagraphEdit & {
         }
     
       </div>
-    
-      @if (!showFinalOutput) {
-        <!-- Sequential Workflow: Show both Next Editor and Generate Final Output options in same container -->
-        @if (isSequentialMode && paragraphEdits.length > 0) {
-          <div class="sequential-actions-container">
-            <!-- Generate Final Output Button (always available in sequential mode) -->
-            <div class="final-output-actions">
-              <button
-                type="button"
-                class="final-output-btn"
-                (click)="onGenerateFinal(); $event.stopPropagation()"
-                [disabled]="!allParagraphsDecided || isGeneratingFinal">
-                @if (isGeneratingFinal) {
-                  <span class="spinner"></span>
-                }
-                {{ isGeneratingFinal ? 'Generating Final Output...' : 'Generate Output' }}
-              </button>
-              @if (!allParagraphsDecided) {
-                <p class="final-output-hint">
-                  Please approve or reject all paragraph edits and feedback to generate the final article.
-                </p>
-              }
-            </div>
 
-            <!-- Next Editor Button (only if not last editor) -->
-            @if (!isLastEditor) {
-              <div class="next-editor-actions">
-                <button
-                  type="button"
-                  class="next-editor-btn"
-                  (click)="onNextEditor(); $event.stopPropagation()"
-                  [disabled]="!allParagraphsDecided || isGenerating">
-                  @if (isGenerating) {
-                    <span class="spinner"></span>
-                  }
-                  {{ isGenerating ? 'Loading Next Editor...' : 'Next Editor →' }}
-                </button>
-                @if (!allParagraphsDecided) {
-                  <p class="next-editor-hint">
-                    Please approve or reject all paragraph edits before proceeding to the next editor.
-                  </p>
-                }
-              </div>
-            }
+      <!-- Sequential Workflow Progress Indicator -->
+      @if (isSequentialMode && currentEditor) {
+        <div class="sequential-progress">
+          <div class="progress-header">
+            <h4 class="progress-title">Editor Progress</h4>
+            <span class="progress-badge">
+              {{ (currentEditorIndex ?? 0) + 1 }} of {{ totalEditors ?? 0 }}
+            </span>
           </div>
-        } @else {
-          <!-- Non-sequential mode: Show only Generate Final Output -->
+          <div class="progress-bar-container">
+            <div class="progress-bar" [style.width.%]="(((currentEditorIndex ?? 0) + 1) / (totalEditors ?? 1)) * 100"></div>
+          </div>
+          <p class="progress-text">
+            Current Editor: <strong>{{ getEditorDisplayName(currentEditor) }}</strong>
+          </p>
+        </div>
+      }
+
+      <!-- Sequential Workflow: Show both Next Editor and Generate Final Output options -->
+      @if (isSequentialMode && paragraphEdits.length > 0 && !showFinalOutput) {
+        <div class="sequential-actions-container">
           <div class="final-output-actions">
-            <button
+            <button 
               type="button"
               class="final-output-btn"
               (click)="onGenerateFinal(); $event.stopPropagation()"
@@ -230,7 +205,7 @@ type ParagraphFeedback = ParagraphEdit & {
               @if (isGeneratingFinal) {
                 <span class="spinner"></span>
               }
-              {{ isGeneratingFinal ? 'Generating...' : 'Run Final Output' }}
+              {{ isGeneratingFinal ? 'Generating Final Output...' : 'Generate Final Output' }}
             </button>
             @if (!allParagraphsDecided) {
               <p class="final-output-hint">
@@ -238,7 +213,49 @@ type ParagraphFeedback = ParagraphEdit & {
               </p>
             }
           </div>
-        }
+
+          <!-- Next Editor Button (only if not last editor) -->
+          @if (!isLastEditor) {
+            <div class="next-editor-actions">
+              <button 
+                type="button"
+                class="next-editor-btn"
+                (click)="onNextEditor(); $event.stopPropagation()"
+                [disabled]="!allParagraphsDecided || isGenerating">
+                @if (isGenerating) {
+                  <span class="spinner"></span>
+                }
+                {{ isGenerating ? 'Loading Next Editor...' : 'Next Editor →' }}
+              </button>
+              @if (!allParagraphsDecided) {
+                <p class="next-editor-hint">
+                  Please approve or reject all paragraph edits before proceeding to the next editor.
+                </p>
+              }
+            </div>
+          }
+        </div>
+      }
+
+      <!-- Non-sequential mode: Show only Generate Final Output -->
+      @if (!isSequentialMode && !showFinalOutput && paragraphEdits.length > 0) {
+        <div class="final-output-actions">
+          <button
+            type="button"
+            class="final-output-btn"
+            (click)="onGenerateFinal(); $event.stopPropagation()"
+            [disabled]="!allParagraphsDecided || isGeneratingFinal">
+            @if (isGeneratingFinal) {
+              <span class="spinner"></span>
+            }
+            {{ isGeneratingFinal ? 'Generating...' : 'Run Final Output' }}
+          </button>
+          @if (!allParagraphsDecided) {
+            <p class="final-output-hint">
+              Please approve or reject all paragraph edits and feedback to generate the final article.
+            </p>
+          }
+        </div>
       }
     </div>
     `,
@@ -632,86 +649,9 @@ type ParagraphFeedback = ParagraphEdit & {
     }
 
     .final-output-actions {
-      display: flex;
-      flex-direction: column;
-      gap: 8px;
-      flex: 1;
-      min-width: 200px;
-    }
-
-    /* Remove margin when inside sequential container (handled by container padding) */
-    .sequential-actions-container .final-output-actions {
-      margin: 0;
-    }
-
-    /* Non-sequential mode: Add border-top when not inside sequential container */
-    .result-section > .final-output-actions {
       margin-top: 24px;
       padding-top: 16px;
       border-top: 2px solid var(--border-color, #E5E7EB);
-    }
-
-    .final-output-btn {
-      padding: 12px 24px;
-      background-color: #D04A02;
-      color: white;
-      border: none;
-      border-radius: 8px;
-      font-size: 14px;
-      font-weight: 600;
-      cursor: pointer;
-      transition: all 0.2s ease;
-      display: inline-flex;
-      align-items: center;
-      gap: 8px;
-      text-align: center;
-      text-decoration: none;
-      -webkit-appearance: none;
-      -moz-appearance: none;
-      appearance: none;
-      user-select: none;
-      margin: 0;
-      font-family: inherit;
-    }
-
-    /* Change button color to green when in sequential mode (to match Guided Journey) */
-    .sequential-actions-container .final-output-btn {
-      background-color: #10B981;
-    }
-
-    .sequential-actions-container .final-output-btn:hover:not(:disabled):not(.disabled) {
-      background-color: #059669;
-      box-shadow: 0 4px 8px rgba(16, 185, 129, 0.3);
-    }
-
-    .sequential-actions-container .final-output-btn:focus:not(:disabled):not(.disabled) {
-      outline: 2px solid #10B981;
-      outline-offset: 2px;
-    }
-
-    .final-output-btn:hover:not(:disabled):not(.disabled) {
-      background-color: #b83d01;
-      transform: translateY(-1px);
-      box-shadow: 0 4px 8px rgba(208, 74, 2, 0.3);
-    }
-
-    .final-output-btn:disabled,
-    .final-output-btn.disabled {
-      opacity: 0.6;
-      cursor: not-allowed;
-      pointer-events: none;
-    }
-
-    .final-output-btn:focus:not(:disabled):not(.disabled) {
-      outline: 2px solid #D04A02;
-      outline-offset: 2px;
-    }
-
-    .final-output-hint {
-      margin-top: 12px;
-      font-size: 13px;
-      color: #6B7280;
-      font-style: italic;
     }
 
     .spinner {
@@ -912,20 +852,30 @@ type ParagraphFeedback = ParagraphEdit & {
       border-radius: 3px;
     }
 
-    :host ::ng-deep .highlight-green {
-      background: #d1fae5;
-      color: #065f46;
-      font-weight: 700;
-      padding: 2px 4px;
-      border-radius: 3px;
-    }
-
     :host ::ng-deep .strikeout {
       text-decoration: line-through;
     }
 
     :host ::ng-deep .highlight-fix {
       color: #0c9500;
+      font-weight: 700;
+      padding: 2px 4px;
+      border-radius: 3px;
+    }
+
+    :host ::ng-deep .highlight-green {
+      background: #86efac;
+      color: #166534;
+      font-weight: 700;
+      padding: 2px 4px;
+      border-radius: 3px;
+    }
+
+    // Strikeout with yellow background (for approved issues in original)
+    :host ::ng-deep .strikeout.highlight-yellow {
+      background: #fef08a;
+      color: #92400e;
+      text-decoration: line-through;
       font-weight: 700;
       padding: 2px 4px;
       border-radius: 3px;
@@ -973,89 +923,179 @@ type ParagraphFeedback = ParagraphEdit & {
       cursor: not-allowed;
     }
 
-    /* Sequential workflow actions */
+    // Sequential Workflow Progress Indicator
+    .sequential-progress {
+      margin: 24px 0;
+      padding: 16px;
+      background: #F9FAFB;
+      border: 1px solid #E5E7EB;
+      border-radius: 8px;
+    }
+
+    .progress-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 12px;
+    }
+
+    .progress-title {
+      font-size: 16px;
+      font-weight: 600;
+      color: var(--text-primary, #1F2937);
+      margin: 0;
+    }
+
+    .progress-badge {
+      padding: 4px 12px;
+      background: #3B82F6;
+      color: white;
+      border-radius: 12px;
+      font-size: 12px;
+      font-weight: 600;
+    }
+
+    .progress-bar-container {
+      width: 100%;
+      height: 8px;
+      background: #E5E7EB;
+      border-radius: 4px;
+      overflow: hidden;
+      margin-bottom: 12px;
+    }
+
+    .progress-bar {
+      height: 100%;
+      background: linear-gradient(90deg, #3B82F6, #60A5FA);
+      border-radius: 4px;
+      transition: width 0.3s ease;
+    }
+
+    .progress-text {
+      font-size: 14px;
+      color: var(--text-secondary, #6B7280);
+      margin: 0;
+      
+      strong {
+        color: var(--text-primary, #1F2937);
+        font-weight: 600;
+      }
+    }
+
+    // Sequential Actions Container (holds both Next Editor and Generate Final Output)
     .sequential-actions-container {
-      margin-top: 24px;
-      padding-top: 16px;
-      border-top: 2px solid var(--border-color, #E5E7EB);
+      margin: 24px 0;
       display: flex;
       flex-direction: row;
       gap: 16px;
       align-items: flex-start;
-      flex-wrap: wrap;
-    }
 
-    @media (max-width: 768px) {
-      .sequential-actions-container {
-        flex-direction: column;
+      .final-output-actions,
+      .next-editor-actions {
+        flex: 1;
+        padding: 20px;
+        background: #F0F7FF;
+        border: 1px solid #BFDBFE;
+        border-radius: 8px;
+        text-align: center;
       }
-    }
-
-    /* Style final-output-actions and next-editor-actions when inside sequential container */
-    .sequential-actions-container .final-output-actions,
-    .sequential-actions-container .next-editor-actions {
-      flex: 1;
-      padding: 20px;
-      background: #F0F7FF;
-      border: 1px solid #BFDBFE;
-      border-radius: 8px;
-      text-align: center;
-      margin: 0;
-    }
-
-    .next-editor-actions {
-      display: flex;
-      flex-direction: column;
-      gap: 8px;
-      flex: 1;
-      min-width: 200px;
     }
 
     .next-editor-btn {
       padding: 12px 24px;
-      background-color: #3B82F6;
+      background: #3B82F6;
       color: white;
       border: none;
       border-radius: 8px;
-      font-size: 14px;
+      font-size: 15px;
       font-weight: 600;
       cursor: pointer;
       transition: all 0.2s ease;
       display: inline-flex;
       align-items: center;
       gap: 8px;
-      text-align: center;
-      text-decoration: none;
-      -webkit-appearance: none;
-      -moz-appearance: none;
-      appearance: none;
-      user-select: none;
-      margin: 0;
-      font-family: inherit;
-    }
-
-    .next-editor-btn:hover:not(:disabled) {
-      background-color: #2563EB;
-      transform: translateY(-1px);
-      box-shadow: 0 4px 8px rgba(59, 130, 246, 0.3);
-    }
-
-    .next-editor-btn:disabled {
-      opacity: 0.6;
-      cursor: not-allowed;
-      pointer-events: none;
-    }
-
-    .next-editor-btn:focus:not(:disabled) {
-      outline: 2px solid #0369a1;
-      outline-offset: 2px;
+      
+      &:hover:not(:disabled) {
+        background: #2563EB;
+        transform: translateY(-1px);
+        box-shadow: 0 4px 8px rgba(59, 130, 246, 0.3);
+      }
+      
+      &:disabled {
+        opacity: 0.6;
+        cursor: not-allowed;
+      }
+      
+      .spinner {
+        width: 16px;
+        height: 16px;
+        border: 2px solid rgba(255, 255, 255, 0.3);
+        border-top-color: white;
+        border-radius: 50%;
+        animation: spin 0.8s linear infinite;
+      }
     }
 
     .next-editor-hint {
       margin-top: 12px;
       font-size: 13px;
       color: #6B7280;
-      font-style: italic;
+      margin-bottom: 0;
+    }
+
+    // Final Output Actions (updated for sequential mode)
+    .final-output-actions {
+      margin: 24px 0;
+      padding: 20px;
+      background: #F0F7FF;
+      border: 1px solid #BFDBFE;
+      border-radius: 8px;
+      text-align: center;
+
+      .sequential-actions-container & {
+        margin: 0;
+      }
+    }
+
+    .final-output-btn {
+      padding: 12px 24px;
+      background: #10B981;
+      color: white;
+      border: none;
+      border-radius: 8px;
+      font-size: 15px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s ease;
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      
+      &:hover:not(:disabled) {
+        background: #059669;
+        transform: translateY(-1px);
+        box-shadow: 0 4px 8px rgba(16, 185, 129, 0.3);
+      }
+      
+      &:disabled {
+        opacity: 0.6;
+        cursor: not-allowed;
+      }
+      
+      .spinner {
+        width: 16px;
+        height: 16px;
+        border: 2px solid rgba(255, 255, 255, 0.3);
+        border-top-color: white;
+        border-radius: 50%;
+        animation: spin 0.8s linear infinite;
+      }
+    }
+
+    .final-output-hint {
+      margin-top: 12px;
+      font-size: 13px;
+      color: #6B7280;
       margin-bottom: 0;
     }
     
@@ -1065,43 +1105,46 @@ export class ParagraphEditsConsolidatedComponent implements OnChanges {
   @Input() paragraphEdits: ParagraphEdit[] = [];
   @Input() showFinalOutput: boolean = false;
   @Input() isGeneratingFinal: boolean = false;
-  @Input() isSequentialMode: boolean = false;
-  @Input() isLastEditor: boolean = false;
-  @Input() currentEditor: string | null = null;
-  @Input() currentEditorIndex: number = 0;
-  @Input() totalEditors: number = 0;
-  @Input() isGenerating: boolean = false;
+  // Sequential workflow inputs
+  @Input() threadId?: string | null;
+  @Input() currentEditor?: string | null;
+  @Input() isSequentialMode?: boolean;
+  @Input() isLastEditor?: boolean;
+  @Input() currentEditorIndex?: number;
+  @Input() totalEditors?: number;
+  @Input() isGenerating?: boolean;
   @Output('paragraphApproved') paragraphApproved = new EventEmitter<number>();
   @Output('paragraphDeclined') paragraphDeclined = new EventEmitter<number>();
   @Output('generateFinal') generateFinal = new EventEmitter<void>();
   @Output('nextEditor') nextEditor = new EventEmitter<void>();
 
+  constructor(private cdr: ChangeDetectorRef) {}
+
   get allParagraphsDecided(): boolean {
-    // First check paragraph-level approvals using utility function
+    // Check both paragraph-level decisions and feedback decisions
     const paragraphsDecided = allParagraphsDecided(this.paragraphEdits);
-    
-    if (!paragraphsDecided) {
-      return false;
-    }
-    
-    // Then check if all editorial feedback items are decided (like Guided Journey)
-    return this.allEditorialFeedbackDecided;
+    const feedbackDecided = this.allParagraphFeedbackDecided;
+    return paragraphsDecided && feedbackDecided;
   }
 
-  /** Check if all editorial feedback items are decided (like Guided Journey's allParagraphFeedbackDecided) */
-  get allEditorialFeedbackDecided(): boolean {
+  /** Check if all paragraph feedback items are decided */
+  get allParagraphFeedbackDecided(): boolean {
     if (!this.paragraphEdits || this.paragraphEdits.length === 0) {
-      return true; // No paragraphs to check
+      return true; // No feedback to decide
     }
     
     return this.paragraphEdits.every(para => {
-      // Check if paragraph itself is decided (already checked above, but ensure consistency)
+      // Check if paragraph itself is decided
       if (para.approved === null || para.approved === undefined) {
         return false;
       }
       
       // Check if all editorial feedback items are decided
-      const feedbackTypes = Object.keys(para.editorial_feedback || {});
+      if (!para.editorial_feedback) {
+        return true; // No feedback means nothing to decide
+      }
+      
+      const feedbackTypes = Object.keys(para.editorial_feedback);
       for (const editorType of feedbackTypes) {
         const feedbacks = (para.editorial_feedback as any)[editorType] || [];
         for (const fb of feedbacks) {
@@ -1161,10 +1204,6 @@ export class ParagraphEditsConsolidatedComponent implements OnChanges {
     this.generateFinal.emit();
   }
 
-  onNextEditor() {
-    this.nextEditor.emit();
-  }
-
   /** Number of paragraphs auto-approved by the service or by identical content */
   get autoApprovedCount(): number {
     return this.paragraphEdits.filter(p => p.autoApproved === true).length;
@@ -1179,10 +1218,8 @@ export class ParagraphEditsConsolidatedComponent implements OnChanges {
 
   // Initialize displayOriginal/displayEdited with highlights when input changes
   // Use a lifecycle hook to prepare initial highlighted views so UI shows yellow highlights by default
-  ngOnChanges(changes: SimpleChanges): void {
-    if (changes['paragraphEdits'] && changes['paragraphEdits'].currentValue) {
-      this.initializeHighlights();
-    }
+  ngOnChanges(): void {
+    this.initializeHighlights();
   }
 
   private initializeHighlights(): void {
@@ -1190,10 +1227,15 @@ export class ParagraphEditsConsolidatedComponent implements OnChanges {
     this.paragraphEdits.forEach((p: any, idx: number) => {
       // ensure index is set
       if (p.index === undefined || p.index === null) p.index = idx;
-      // Always initialize with highlights - display fields will be updated dynamically
-      // Clear display fields so highlightAllFeedbacks() handles all highlighting
-      p.displayOriginal = undefined;
-      p.displayEdited = undefined;
+      // Always use highlightAllFeedbacks() to show default highlighting (yellow for unreviewed)
+      // Only use displayOriginal/displayEdited if they were explicitly set (e.g., after approval/rejection)
+      // Otherwise, let highlightAllFeedbacks() handle it dynamically
+      if (p.displayOriginal === undefined && p.displayEdited === undefined) {
+        // Don't set display properties - let template call highlightAllFeedbacks() directly
+        // This ensures default yellow highlighting shows for unreviewed feedback
+      } else {
+        // If display properties exist, keep them (they were set by user actions)
+      }
     });
   }
 
@@ -1273,13 +1315,8 @@ export class ParagraphEditsConsolidatedComponent implements OnChanges {
 
 
   highlightAllFeedbacks(para: ParagraphEdit | ParagraphFeedback | null | undefined): { original: string, edited: string } {
-    if (!para) {
-      return { original: '', edited: '' };
-    }
-
-    // Strip HTML from original text to work with plain text
-    const originalText = this.stripHtmlSpans(para.original ?? '');
-    const editedText = this.stripHtmlSpans(para.edited ?? '');
+    const originalText = this.stripHtmlSpans((para as any)?.original ?? '');
+    const editedText = this.stripHtmlSpans((para as any)?.edited ?? '');
 
     let highlightedOriginal = originalText;
     let highlightedEdited = editedText;
@@ -1392,6 +1429,7 @@ export class ParagraphEditsConsolidatedComponent implements OnChanges {
     }
     // Mutate the real paragraph objects so the template picks up changes
     this.paragraphEdits.forEach((para: any) => {
+      para.approved = true;
       Object.keys(para.editorial_feedback || {}).forEach(editorType => {
         const feedbacks = (para.editorial_feedback as any)[editorType] || [];
         feedbacks.forEach((fb: any) => {
@@ -1399,11 +1437,12 @@ export class ParagraphEditsConsolidatedComponent implements OnChanges {
           fb.approved = true;
         });
       });
-      para.approved = true;
       // Clear display properties so highlightAllFeedbacks() handles all highlighting
       para.displayOriginal = undefined;
       para.displayEdited = undefined;
     });
+    // Force change detection to update the view
+    this.cdr.detectChanges();
   }
 
   rejectAllFeedback(): void {
@@ -1413,6 +1452,7 @@ export class ParagraphEditsConsolidatedComponent implements OnChanges {
     }
     // Mutate the real paragraph objects so the template picks up changes
     this.paragraphEdits.forEach((para: any) => {
+      para.approved = false;
       Object.keys(para.editorial_feedback || {}).forEach(editorType => {
         const feedbacks = (para.editorial_feedback as any)[editorType] || [];
         feedbacks.forEach((fb: any) => {
@@ -1420,37 +1460,26 @@ export class ParagraphEditsConsolidatedComponent implements OnChanges {
           fb.approved = false;
         });
       });
-      para.approved = false;
       // Clear display properties so highlightAllFeedbacks() handles all highlighting
       para.displayOriginal = undefined;
       para.displayEdited = undefined;
     });
+    // Force change detection to update the view
+    this.cdr.detectChanges();
   }
 
   /** Unified Approve All: approve all feedback items and approve all paragraphs */
   approveAll(): void {
     if (this.showFinalOutput) return;
-    // Approve all editorial feedback and paragraphs
+    // Approve only editorial feedback — do not emit paragraph-level approve events
     this.approveAllFeedback();
-    // Also emit paragraph approval events for each paragraph
-    this.paragraphEdits.forEach(paragraph => {
-      if (paragraph.index !== undefined && paragraph.index !== null) {
-        this.paragraphApproved.emit(paragraph.index);
-      }
-    });
   }
 
   /** Unified Decline All: reject all feedback items and decline all paragraphs */
   declineAll(): void {
     if (this.showFinalOutput) return;
-    // Reject all editorial feedback and paragraphs
+    // Reject only editorial feedback — do not emit paragraph-level decline events
     this.rejectAllFeedback();
-    // Also emit paragraph decline events for each paragraph
-    this.paragraphEdits.forEach(paragraph => {
-      if (paragraph.index !== undefined && paragraph.index !== null) {
-        this.paragraphDeclined.emit(paragraph.index);
-      }
-    });
   }
 
   // derived minimal shape used for bulk operations
@@ -1482,6 +1511,27 @@ export class ParagraphEditsConsolidatedComponent implements OnChanges {
     // Clear display properties so highlightAllFeedbacks() handles all highlighting
     para.displayOriginal = undefined;
     para.displayEdited = undefined;
+  }
+
+  /** Get display name for editor */
+  getEditorDisplayName(editorId: string | null | undefined): string {
+    if (!editorId) return '';
+    
+    // Map editor IDs to display names
+    const editorMap: { [key: string]: string } = {
+      'development': 'Development Editor',
+      'content': 'Content Editor',
+      'line': 'Line Editor',
+      'copy': 'Copy Editor',
+      'brand-alignment': 'PwC Brand Alignment Editor'
+    };
+    
+    return editorMap[editorId] || editorId;
+  }
+
+  /** Handle next editor button click */
+  onNextEditor(): void {
+    this.nextEditor.emit();
   }
   
 }
