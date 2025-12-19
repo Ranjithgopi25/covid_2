@@ -1077,7 +1077,42 @@ export class ParagraphEditsConsolidatedComponent implements OnChanges {
   @Output('nextEditor') nextEditor = new EventEmitter<void>();
 
   get allParagraphsDecided(): boolean {
-    return allParagraphsDecided(this.paragraphEdits);
+    // First check paragraph-level approvals using utility function
+    const paragraphsDecided = allParagraphsDecided(this.paragraphEdits);
+    
+    if (!paragraphsDecided) {
+      return false;
+    }
+    
+    // Then check if all editorial feedback items are decided (like Guided Journey)
+    return this.allEditorialFeedbackDecided;
+  }
+
+  /** Check if all editorial feedback items are decided (like Guided Journey's allParagraphFeedbackDecided) */
+  get allEditorialFeedbackDecided(): boolean {
+    if (!this.paragraphEdits || this.paragraphEdits.length === 0) {
+      return true; // No paragraphs to check
+    }
+    
+    return this.paragraphEdits.every(para => {
+      // Check if paragraph itself is decided (already checked above, but ensure consistency)
+      if (para.approved === null || para.approved === undefined) {
+        return false;
+      }
+      
+      // Check if all editorial feedback items are decided
+      const feedbackTypes = Object.keys(para.editorial_feedback || {});
+      for (const editorType of feedbackTypes) {
+        const feedbacks = (para.editorial_feedback as any)[editorType] || [];
+        for (const fb of feedbacks) {
+          if (fb.approved === null || fb.approved === undefined) {
+            return false;
+          }
+        }
+      }
+      
+      return true;
+    });
   }
 
   get allParagraphsApproved(): boolean {
