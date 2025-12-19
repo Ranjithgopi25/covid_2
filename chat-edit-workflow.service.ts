@@ -19,13 +19,6 @@ export interface EditWorkflowState {
   selectedEditors: string[];
   originalContent: string;
   paragraphEdits: ParagraphEdit[];
-  // Sequential workflow properties
-  threadId: string | null;
-  isSequentialMode: boolean;
-  currentEditor: string | null;
-  currentEditorIndex: number;
-  totalEditors: number;
-  isLastEditor: boolean;
 }
 
 export interface EditWorkflowMessage {
@@ -56,14 +49,7 @@ export class ChatEditWorkflowService {
     uploadedFile: null,
     selectedEditors: ['brand-alignment'],
     originalContent: '',
-    paragraphEdits: [],
-    // Sequential workflow properties
-    threadId: null,
-    isSequentialMode: false,
-    currentEditor: null,
-    currentEditorIndex: 0,
-    totalEditors: 0,
-    isLastEditor: false
+    paragraphEdits: []
   });
 
   public state$: Observable<EditWorkflowState> = this.stateSubject.asObservable();
@@ -83,6 +69,14 @@ export class ChatEditWorkflowService {
   public get isGeneratingFinal(): boolean {
     return this.isGeneratingFinalSubject.value;
   }
+
+  // Sequential workflow state tracking
+  private threadId: string | null = null;
+  private currentEditor: string | null = null;
+  private isSequentialMode: boolean = false;
+  private isLastEditor: boolean = false;
+  private currentEditorIndex: number = 0;
+  private totalEditors: number = 0;
 
   readonly editorOptions: EditorOption[] = [
     { 
@@ -706,15 +700,6 @@ export class ChatEditWorkflowService {
 
     const normalizedEditorIds = normalizeEditorOrder(selectedIds);
 
-    // Initialize totalEditors before stream starts (like Guided Journey)
-    // Sequential mode will be determined by backend via thread_id in editor_complete event
-    this.updateState({
-      ...this.currentState,
-      totalEditors: normalizedEditorIds.length,
-      currentEditorIndex: 0,
-      isLastEditor: false
-    });
-
     let fullResponse = '';
     let combinedFeedback = '';
     let finalRevisedContent = '';
@@ -771,60 +756,20 @@ export class ChatEditWorkflowService {
           }
         } else if (data.type === 'editor_complete') {
           // Sequential workflow: Handle single editor completion
-          console.log('[ChatEditWorkflow] Editor complete:', data);
-          
-          // Prepare combined state update to avoid race conditions
-          const stateUpdates: Partial<EditWorkflowState> = {};
+          console.log('[ChatEditWorkflowService] Editor complete:', data);
           
           // Store thread_id for sequential workflow
           if (data.thread_id) {
-            stateUpdates.threadId = data.thread_id;
-            stateUpdates.isSequentialMode = true;
+            this.threadId = data.thread_id;
+            this.isSequentialMode = true;
           }
           
           // Store current editor info
           if (data.current_editor) {
-            // Backend sends editor_index as 0-based, but we need to handle both 0-based and 1-based
-            // If editor_index is missing, we can't determine position, so use 0 as default
-            let editorIndex = data.editor_index !== undefined && data.editor_index !== null ? data.editor_index : 0;
-            const totalEditors = data.total_editors || normalizedEditorIds.length;
-            
-            // Ensure editorIndex is 0-based for comparison (if backend sends 1-based, convert it)
-            // Compare: if editorIndex is >= totalEditors, it might be 1-based, so subtract 1
-            if (editorIndex > 0 && editorIndex >= totalEditors) {
-              editorIndex = editorIndex - 1; // Convert 1-based to 0-based
-            }
-            
-            // isLastEditor: 0-based index comparison (if index is last valid index, it's the last editor)
-            // For 3 editors (indices 0, 1, 2), last editor is at index 2
-            const isLastEditor = editorIndex >= (totalEditors - 1);
-            
-            console.log('[ChatEditWorkflow] Editor index calculation:', {
-              editor_index: data.editor_index,
-              normalizedIndex: editorIndex,
-              totalEditors,
-              isLastEditor,
-              currentEditor: data.current_editor
-            });
-            
-            stateUpdates.currentEditor = data.current_editor;
-            stateUpdates.currentEditorIndex = editorIndex;
-            stateUpdates.totalEditors = totalEditors;
-            stateUpdates.isLastEditor = isLastEditor;
-            
-            // CRITICAL FIX: If we have multiple editors (> 1) and current_editor info,
-            // it means sequential processing is happening (like Guided Journey)
-            if (totalEditors > 1) {
-              stateUpdates.isSequentialMode = true;
-            }
-          }
-          
-          // Apply state updates if any
-          if (Object.keys(stateUpdates).length > 0) {
-            this.updateState({
-              ...this.currentState,
-              ...stateUpdates
-            });
+            this.currentEditor = data.current_editor;
+            this.currentEditorIndex = data.editor_index || 0;
+            this.totalEditors = data.total_editors || this.totalEditors;
+            this.isLastEditor = (data.editor_index || 0) >= (data.total_editors || 1) - 1;
           }
           
           const completedEditor = editorProgressList.find(e => e.editorId === data.current_editor || e.editorId === data.editor);
@@ -832,18 +777,25 @@ export class ChatEditWorkflowService {
             completedEditor.status = 'completed';
           }
           
-          // Process paragraph edits if provided
+          if (data.revised_content || data.final_revised) {
+            fullResponse = data.revised_content || data.final_revised || '';
+          }
+          
+          // Process paragraph edits from editor_complete (same structure as final_complete)
           let paragraphEdits: ParagraphEdit[] = [];
           if (data.paragraph_edits && Array.isArray(data.paragraph_edits)) {
+            console.log('[ChatEditWorkflowService] Paragraph edits received:', data.paragraph_edits);
             const allEditorNames = selectedIds.map(editorId => {
               return getEditorDisplayName(editorId);
             });
             
+            // Get original content - prioritize data.original_content, then currentState
             const originalContent = data.original_content || this.currentState.originalContent || '';
             const originalParagraphs = originalContent ? splitIntoParagraphs(originalContent) : [];
             
             paragraphEdits = data.paragraph_edits.map((edit: any, arrayIndex: number) => {
               const existingTags = edit.tags || [];
+              
               const existingEditorNames = new Set<string>(
                 existingTags.map((tag: string) => {
                   const match = tag.match(/^(.+?)\s*\(/);
@@ -868,16 +820,15 @@ export class ChatEditWorkflowService {
               const isIdentical = validateStringEquality(originalText, editedText);
               const autoApproved = edit.autoApproved !== undefined ? edit.autoApproved : isIdentical;
               const approved = autoApproved ? true : (edit.approved !== undefined ? edit.approved : null);
-              
-              // Process editorial_feedback with same structure as Guided Journey (always include all editor types)
-              const editorial_feedback = {
-                development: edit.editorial_feedback?.development || [],
-                content: edit.editorial_feedback?.content || [],
-                copy: edit.editorial_feedback?.copy || [],
-                line: edit.editorial_feedback?.line || [],
-                brand: edit.editorial_feedback?.brand || []
-              };
-              
+
+              const editorial_feedback = edit.editorial_feedback ? {
+                development: edit.editorial_feedback.development || [],
+                content: edit.editorial_feedback.content || [],
+                copy: edit.editorial_feedback.copy || [],
+                line: edit.editorial_feedback.line || [],
+                brand: edit.editorial_feedback.brand || []
+              } : undefined;
+
               return {
                 index: paragraphIndex,
                 original: originalText,
@@ -887,27 +838,46 @@ export class ChatEditWorkflowService {
                 approved: approved,
                 editorial_feedback: editorial_feedback,
                 displayOriginal: originalText,
-                displayEdited: editedText,
-                block_type: (edit.block_type || 'paragraph') as any,
-                level: (edit.level || 0) as any
+                displayEdited: editedText
               } as ParagraphEdit;
             });
             
             // Update state with paragraph edits
+            const preservedOriginalContent = data.original_content || this.currentState.originalContent || '';
             this.updateState({
               ...this.currentState,
               paragraphEdits: paragraphEdits,
-              originalContent: data.original_content || this.currentState.originalContent
+              originalContent: preservedOriginalContent
             });
+            
+            // Dispatch paragraph edits message with sequential metadata
+            const paragraphMessage: Message = {
+              role: 'assistant',
+              content: '',
+              timestamp: new Date(),
+              isHtml: false,
+              editWorkflow: {
+                step: 'awaiting_approval',
+                paragraphEdits: paragraphEdits,
+                showCancelButton: false,
+                showSimpleCancelButton: true,
+                threadId: this.threadId,
+                currentEditor: this.currentEditor,
+                isSequentialMode: this.isSequentialMode,
+                isLastEditor: this.isLastEditor,
+                currentEditorIndex: this.currentEditorIndex,
+                totalEditors: this.totalEditors
+              }
+            };
+            this.messageSubject.next({ type: 'result', message: paragraphMessage });
           }
           
-          if (data.final_revised) {
-            fullResponse = data.final_revised.trim();
-          }
-          
-          // Dispatch results for this editor (sequential mode)
-          if (data.combined_feedback || data.final_revised) {
-            this.dispatchResultsToChat('', selectedIds, selectedNames, data.combined_feedback || '', data.final_revised || '', paragraphEdits);
+          // Update content
+          if (data.original_content) {
+            this.updateState({
+              ...this.currentState,
+              originalContent: data.original_content
+            });
           }
           
           const progressMessage: Message = {
@@ -998,14 +968,14 @@ export class ChatEditWorkflowService {
               const autoApproved = edit.autoApproved !== undefined ? edit.autoApproved : isIdentical;
               const approved = autoApproved ? true : (edit.approved !== undefined ? edit.approved : null);
 
-              // Process editorial_feedback with same structure as Guided Journey (always include all editor types)
-              const editorial_feedback = {
-                development: edit.editorial_feedback?.development || [],
-                content: edit.editorial_feedback?.content || [],
-                copy: edit.editorial_feedback?.copy || [],
-                line: edit.editorial_feedback?.line || [],
-                brand: edit.editorial_feedback?.brand || []
-              };
+              // Preserve editorial_feedback from backend (same structure as guided journey)
+              const editorial_feedback = edit.editorial_feedback ? {
+                development: edit.editorial_feedback.development || [],
+                content: edit.editorial_feedback.content || [],
+                copy: edit.editorial_feedback.copy || [],
+                line: edit.editorial_feedback.line || [],
+                brand: edit.editorial_feedback.brand || []
+              } : undefined;
 
               return {
                 index: paragraphIndex,
@@ -1016,9 +986,7 @@ export class ChatEditWorkflowService {
                 approved: approved,
                 editorial_feedback: editorial_feedback,
                 displayOriginal: originalText,
-                displayEdited: editedText,
-                block_type: (edit.block_type || 'paragraph') as any,
-                level: (edit.level || 0) as any
+                displayEdited: editedText
               } as ParagraphEdit;
             });
           } else if (data.final_revised && data.original_content) {
@@ -1181,7 +1149,13 @@ export class ChatEditWorkflowService {
           step: 'awaiting_approval',
           paragraphEdits: paragraphEdits,
           showCancelButton: false,
-          showSimpleCancelButton: true
+          showSimpleCancelButton: true,
+          threadId: this.threadId,
+          currentEditor: this.currentEditor,
+          isSequentialMode: this.isSequentialMode,
+          isLastEditor: this.isLastEditor,
+          currentEditorIndex: this.currentEditorIndex,
+          totalEditors: this.totalEditors
         }
       };
       this.messageSubject.next({ type: 'result', message: paragraphMessage });
@@ -1256,6 +1230,14 @@ export class ChatEditWorkflowService {
   }
 
   completeWorkflow(): void {
+    // Reset sequential workflow state
+    this.threadId = null;
+    this.currentEditor = null;
+    this.isSequentialMode = false;
+    this.isLastEditor = false;
+    this.currentEditorIndex = 0;
+    this.totalEditors = 0;
+    
     this.updateState(this.getDefaultState());
     this.workflowCompletedSubject.next();
   }
@@ -1276,14 +1258,7 @@ export class ChatEditWorkflowService {
       uploadedFile: null,
       selectedEditors: ['brand-alignment'],
       originalContent: '',
-      paragraphEdits: [],
-      // Sequential workflow properties
-      threadId: null,
-      isSequentialMode: false,
-      currentEditor: null,
-      currentEditorIndex: 0,
-      totalEditors: 0,
-      isLastEditor: false
+      paragraphEdits: []
     };
   }
 
@@ -1384,7 +1359,13 @@ export class ChatEditWorkflowService {
         step: 'awaiting_approval',
         paragraphEdits: [...this.currentState.paragraphEdits],
         showCancelButton: false,
-        showSimpleCancelButton: true
+        showSimpleCancelButton: true,
+        threadId: this.threadId,
+        currentEditor: this.currentEditor,
+        isSequentialMode: this.isSequentialMode,
+        isLastEditor: this.isLastEditor,
+        currentEditorIndex: this.currentEditorIndex,
+        totalEditors: this.totalEditors
       }
     };
     
@@ -1410,37 +1391,7 @@ export class ChatEditWorkflowService {
   
   /** Check if all paragraphs have been decided */
   get allParagraphsDecided(): boolean {
-    // First check paragraph-level approvals using utility function
-    const paragraphsDecided = allParagraphsDecided(this.currentState.paragraphEdits);
-    
-    if (!paragraphsDecided) {
-      return false;
-    }
-    
-    // Then check if all editorial feedback items are decided (like Guided Journey)
-    if (!this.currentState.paragraphEdits || this.currentState.paragraphEdits.length === 0) {
-      return true; // No paragraphs to check
-    }
-    
-    return this.currentState.paragraphEdits.every(para => {
-      // Check if paragraph itself is decided (already checked above, but ensure consistency)
-      if (para.approved === null || para.approved === undefined) {
-        return false;
-      }
-      
-      // Check if all editorial feedback items are decided
-      const feedbackTypes = Object.keys(para.editorial_feedback || {});
-      for (const editorType of feedbackTypes) {
-        const feedbacks = (para.editorial_feedback as any)[editorType] || [];
-        for (const fb of feedbacks) {
-          if (fb.approved === null || fb.approved === undefined) {
-            return false;
-          }
-        }
-      }
-      
-      return true;
-    });
+    return allParagraphsDecided(this.currentState.paragraphEdits);
   }
 
   /** Get paragraphs that require user review (excludes auto-approved) */
@@ -1460,21 +1411,253 @@ export class ChatEditWorkflowService {
     // Combine all original paragraphs
     return sortedEdits.map(p => p.original).filter(p => p && p.trim()).join('\n\n');
   }
-
-  /** Collect feedback decisions from a paragraph */
-  private collectFeedbackDecisions(para: ParagraphEdit): any {
-    const decisions: any = {};
-    const feedbackTypes = Object.keys(para.editorial_feedback || {});
-    
-    for (const editorType of feedbackTypes) {
-      const feedbacks = (para.editorial_feedback as any)[editorType] || [];
-      decisions[editorType] = feedbacks.map((fb: any) => ({
-        issue: fb.issue,
-        approved: fb.approved === true
-      }));
+  
+  /** Move to next editor in sequential workflow */
+  async nextEditor(paragraphEdits: ParagraphEdit[]): Promise<void> {
+    if (!this.threadId) {
+      console.error('[ChatEditWorkflowService] No thread_id available for next editor');
+      const errorMessage: Message = {
+        role: 'assistant',
+        content: '⚠️ **No thread ID available.** Cannot proceed to next editor.',
+        timestamp: new Date()
+      };
+      this.messageSubject.next({ type: 'prompt', message: errorMessage });
+      return;
     }
-    
-    return decisions;
+
+    if (!this.allParagraphsDecided) {
+      const errorMessage: Message = {
+        role: 'assistant',
+        content: '⚠️ **Please approve or reject all paragraph edits** before proceeding to the next editor.',
+        timestamp: new Date()
+      };
+      this.messageSubject.next({ type: 'prompt', message: errorMessage });
+      return;
+    }
+
+    try {
+      // Collect decisions from paragraphEdits
+      const decisions = paragraphEdits.map(para => ({
+        index: para.index,
+        approved: para.approved === true
+      }));
+
+      // Prepare paragraph_edits
+      const paragraph_edits_data = paragraphEdits.map(para => ({
+        index: para.index,
+        original: para.original,
+        edited: para.edited,
+        tags: para.tags || [],
+        autoApproved: para.autoApproved || false,
+        approved: para.approved,
+        block_type: (para as any).block_type || 'paragraph',
+        level: (para as any).level || 0,
+        editorial_feedback: para.editorial_feedback
+      }));
+
+      // Get API URL from environment (supports runtime config via window._env)
+      const apiUrl = (window as any)._env?.apiUrl || '';
+      const response = await fetch(`${apiUrl}/api/v1/tl/edit-content/next`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          thread_id: this.threadId,
+          paragraph_edits: paragraph_edits_data,
+          decisions: decisions,
+          accept_all: false,
+          reject_all: false
+        })
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text().catch(() => 'Unknown error');
+        throw new Error(`Failed to proceed to next editor: ${response.status} ${errorText}`);
+      }
+
+      // Handle streaming response
+      const reader = response.body?.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      if (!reader) {
+        throw new Error('No response body reader available');
+      }
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+
+        for (const line of lines) {
+          if (line.startsWith('data: ')) {
+            const dataStr = line.slice(6).trim();
+            if (dataStr && dataStr !== '[DONE]') {
+              try {
+                const data = JSON.parse(dataStr);
+                
+                // Handle all_complete
+                if (data.type === 'all_complete') {
+                  // Mark as last editor to show "Generate Final Output" button
+                  this.isLastEditor = true;
+                  this.currentEditorIndex = this.totalEditors;
+                  
+                  const updateMessage: Message = {
+                    role: 'assistant',
+                    content: '',
+                    timestamp: new Date(),
+                    isHtml: false,
+                    editWorkflow: {
+                      step: 'awaiting_approval',
+                      paragraphEdits: [...this.currentState.paragraphEdits],
+                      showCancelButton: false,
+                      showSimpleCancelButton: true,
+                      threadId: this.threadId,
+                      currentEditor: this.currentEditor,
+                      isSequentialMode: this.isSequentialMode,
+                      isLastEditor: this.isLastEditor,
+                      currentEditorIndex: this.currentEditorIndex,
+                      totalEditors: this.totalEditors
+                    }
+                  };
+                  this.messageSubject.next({ type: 'update', message: updateMessage });
+                  return;
+                }
+
+                // Handle editor_complete (same as initial flow)
+                if (data.type === 'editor_complete') {
+                  // Store thread_id
+                  if (data.thread_id) {
+                    this.threadId = data.thread_id;
+                  }
+
+                  // Store current editor info
+                  if (data.current_editor) {
+                    this.currentEditor = data.current_editor;
+                    this.currentEditorIndex = data.editor_index || 0;
+                    this.totalEditors = data.total_editors || this.totalEditors;
+                    this.isLastEditor = (data.editor_index || 0) >= (data.total_editors || 1) - 1;
+                  }
+
+                  // Process paragraph edits
+                  let newParagraphEdits: ParagraphEdit[] = [];
+                  if (data.paragraph_edits && Array.isArray(data.paragraph_edits)) {
+                    const allEditorNames = this.currentState.selectedEditors.map(editorId => {
+                      return getEditorDisplayName(editorId);
+                    });
+                    
+                    const originalContent = data.original_content || this.currentState.originalContent || '';
+                    const originalParagraphs = originalContent ? splitIntoParagraphs(originalContent) : [];
+                    
+                    newParagraphEdits = data.paragraph_edits.map((edit: any, arrayIndex: number) => {
+                      const existingTags = edit.tags || [];
+                      const existingEditorNames = new Set<string>(
+                        existingTags.map((tag: string) => {
+                          const match = tag.match(/^(.+?)\s*\(/);
+                          return match ? match[1].trim() : tag;
+                        })
+                      );
+                      
+                      const allTags = [...existingTags];
+                      allEditorNames.forEach(editorName => {
+                        const existingNamesArray = Array.from(existingEditorNames) as string[];
+                        if (!existingNamesArray.some((existing: string) => 
+                          existing.toLowerCase().includes(editorName.toLowerCase()) || 
+                          editorName.toLowerCase().includes(existing.toLowerCase())
+                        )) {
+                          allTags.push(`${editorName} (Reviewed)`);
+                        }
+                      });
+                      
+                      const paragraphIndex = (edit.index !== undefined && edit.index !== null) ? edit.index : arrayIndex;
+                      const originalText = (edit.original && edit.original.trim()) || (originalParagraphs.length > paragraphIndex && paragraphIndex >= 0 ? (originalParagraphs[paragraphIndex] && originalParagraphs[paragraphIndex].trim()) || '' : '');
+                      const editedText = (edit.edited && edit.edited.trim()) || '';
+                      const isIdentical = validateStringEquality(originalText, editedText);
+                      const autoApproved = edit.autoApproved !== undefined ? edit.autoApproved : isIdentical;
+                      const approved = autoApproved ? true : (edit.approved !== undefined ? edit.approved : null);
+
+                      const editorial_feedback = edit.editorial_feedback ? {
+                        development: edit.editorial_feedback.development || [],
+                        content: edit.editorial_feedback.content || [],
+                        copy: edit.editorial_feedback.copy || [],
+                        line: edit.editorial_feedback.line || [],
+                        brand: edit.editorial_feedback.brand || []
+                      } : undefined;
+
+                      return {
+                        index: paragraphIndex,
+                        original: originalText,
+                        edited: editedText,
+                        tags: allTags,
+                        autoApproved: autoApproved,
+                        approved: approved,
+                        editorial_feedback: editorial_feedback,
+                        displayOriginal: originalText,
+                        displayEdited: editedText
+                      } as ParagraphEdit;
+                    });
+                  }
+
+                  // Update content
+                  if (data.original_content) {
+                    this.updateState({
+                      ...this.currentState,
+                      originalContent: data.original_content
+                    });
+                  }
+
+                  // Update state with new paragraph edits
+                  this.updateState({
+                    ...this.currentState,
+                    paragraphEdits: newParagraphEdits
+                  });
+
+                  // Dispatch paragraph edits message with sequential metadata
+                  const paragraphMessage: Message = {
+                    role: 'assistant',
+                    content: '',
+                    timestamp: new Date(),
+                    isHtml: false,
+                    editWorkflow: {
+                      step: 'awaiting_approval',
+                      paragraphEdits: newParagraphEdits,
+                      showCancelButton: false,
+                      showSimpleCancelButton: true,
+                      threadId: this.threadId,
+                      currentEditor: this.currentEditor,
+                      isSequentialMode: this.isSequentialMode,
+                      isLastEditor: this.isLastEditor,
+                      currentEditorIndex: this.currentEditorIndex,
+                      totalEditors: this.totalEditors
+                    }
+                  };
+                  this.messageSubject.next({ type: 'result', message: paragraphMessage });
+                }
+
+                // Handle errors
+                if (data.type === 'error') {
+                  throw new Error(data.error || 'Unknown error');
+                }
+              } catch (e) {
+                console.error('[ChatEditWorkflowService] Error parsing SSE data:', e);
+              }
+            }
+          }
+        }
+      }
+    } catch (error) {
+      console.error('[ChatEditWorkflowService] Error in nextEditor:', error);
+      const errorMessage: Message = {
+        role: 'assistant',
+        content: `⚠️ **Failed to proceed to next editor.** ${error instanceof Error ? error.message : 'Please try again.'}`,
+        timestamp: new Date()
+      };
+      this.messageSubject.next({ type: 'prompt', message: errorMessage });
+    }
   }
   
   /** Generate final article using approved edits */
@@ -1492,11 +1675,9 @@ export class ChatEditWorkflowService {
     this.isGeneratingFinalSubject.next(true);
     
     try {
-      // Collect all approved/rejected decisions from paragraphEdits (including editorial feedback)
-      const paragraphDecisions = this.currentState.paragraphEdits.map(para => ({
-        index: para.index,
-        approved: para.approved === true,
-        editorial_feedback_decisions: this.collectFeedbackDecisions(para)
+      const decisions = this.currentState.paragraphEdits.map(p => ({
+        index: p.index,
+        approved: p.approved === true
       }));
       
       // Get originalContent - use service state if available, otherwise reconstruct from paragraphEdits
@@ -1510,10 +1691,7 @@ export class ChatEditWorkflowService {
         throw new Error('Original content cannot be empty. Unable to reconstruct from paragraph edits.');
       }
       
-      const apiUrl = (window as any)._env?.apiUrl || '';
-      const endpoint = apiUrl ? `${apiUrl}/api/v1/tl/edit-content/final` : '/api/v1/tl/edit-content/final';
-      
-      const response = await fetch(endpoint, {
+      const response = await fetch('/api/v1/tl/edit-content/final', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json'
@@ -1524,15 +1702,9 @@ export class ChatEditWorkflowService {
             index: p.index,
             original: p.original,
             edited: p.edited,
-            tags: p.tags,
-            autoApproved: p.autoApproved,
-            block_type: (p as any).block_type || 'paragraph',
-            level: (p as any).level || 0,
-            editorial_feedback: p.editorial_feedback
+            tags: p.tags
           })),
-          decisions: paragraphDecisions,
-          include_quality_checks: true,
-          include_copy_check: true
+          decisions: decisions
         })
       });
       
@@ -1600,294 +1772,6 @@ export class ChatEditWorkflowService {
       this.messageSubject.next({ type: 'prompt', message: errorMessage });
     } finally {
       this.isGeneratingFinalSubject.next(false);
-    }
-  }
-
-  /** Move to next editor in sequential workflow */
-  async nextEditor(): Promise<void> {
-    if (!this.currentState.threadId) {
-      console.error('[ChatEditWorkflow] No thread_id available for next editor');
-      const errorMessage: Message = {
-        role: 'assistant',
-        content: '⚠️ **Unable to proceed to next editor.** No workflow session found.',
-        timestamp: new Date()
-      };
-      this.messageSubject.next({ type: 'prompt', message: errorMessage });
-      return;
-    }
-
-    if (!this.allParagraphsDecided) {
-      const errorMessage: Message = {
-        role: 'assistant',
-        content: '⚠️ **Please approve or reject all paragraph edits** before proceeding to the next editor.',
-        timestamp: new Date()
-      };
-      this.messageSubject.next({ type: 'prompt', message: errorMessage });
-      return;
-    }
-
-    this.updateState({
-      ...this.currentState,
-      step: 'processing'
-    });
-
-    try {
-      // Collect decisions from paragraphEdits
-      const decisions = this.currentState.paragraphEdits.map(para => ({
-        index: para.index,
-        approved: para.approved === true
-      }));
-
-      // Prepare paragraph_edits
-      const paragraph_edits = this.currentState.paragraphEdits.map(para => ({
-        index: para.index,
-        original: para.original,
-        edited: para.edited,
-        tags: para.tags || [],
-        autoApproved: para.autoApproved || false,
-        approved: para.approved,
-        block_type: (para as any).block_type || 'paragraph',
-        level: (para as any).level || 0,
-        editorial_feedback: para.editorial_feedback
-      }));
-
-      const apiUrl = (window as any)._env?.apiUrl || '';
-      const endpoint = apiUrl ? `${apiUrl}/api/v1/tl/edit-content/next` : '/api/v1/tl/edit-content/next';
-      
-      const response = await fetch(endpoint, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          thread_id: this.currentState.threadId,
-          paragraph_edits: paragraph_edits,
-          decisions: decisions,
-          accept_all: false,
-          reject_all: false
-        })
-      });
-
-      if (!response.ok) {
-        const errorText = await response.text().catch(() => 'Unknown error');
-        throw new Error(`Failed to proceed to next editor: ${response.status} ${errorText}`);
-      }
-
-      // Handle streaming response
-      const reader = response.body?.getReader();
-      const decoder = new TextDecoder();
-      let buffer = '';
-
-      if (!reader) {
-        throw new Error('No response body reader available');
-      }
-
-      const selectedIds = this.currentState.selectedEditors;
-      const selectedNames = this.getSelectedEditorNames(selectedIds);
-      let paragraphEdits: ParagraphEdit[] = [];
-      let combinedFeedback = '';
-      let finalRevisedContent = '';
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split('\n');
-        buffer = lines.pop() || '';
-
-        for (const line of lines) {
-          if (line.startsWith('data: ')) {
-            const dataStr = line.slice(6).trim();
-            if (dataStr && dataStr !== '[DONE]') {
-              try {
-                const data = JSON.parse(dataStr);
-                
-                // Handle all_complete
-                if (data.type === 'all_complete') {
-                  this.updateState({
-                    ...this.currentState,
-                    isLastEditor: true,
-                    currentEditorIndex: this.currentState.totalEditors,
-                    step: 'awaiting_approval'
-                  });
-                  this.messageSubject.next({ type: 'prompt', message: {
-                    role: 'assistant',
-                    content: '✅ **All editors have completed their review.** You can now generate the final article.',
-                    timestamp: new Date(),
-                    editWorkflow: {
-                      step: 'awaiting_approval',
-                      paragraphEdits: [...this.currentState.paragraphEdits]
-                    }
-                  }});
-                  return;
-                }
-
-                // Handle editor_complete
-                if (data.type === 'editor_complete') {
-                  // Prepare state updates - combine thread_id and editor info updates
-                  const stateUpdates: Partial<EditWorkflowState> = {};
-                  
-                  // Store thread_id and ensure sequential mode is enabled
-                  if (data.thread_id) {
-                    stateUpdates.threadId = data.thread_id;
-                    stateUpdates.isSequentialMode = true;
-                  } else if (this.currentState.threadId) {
-                    // If threadId already exists, ensure sequential mode stays true
-                    stateUpdates.isSequentialMode = true;
-                  }
-
-                  // Store current editor info
-                  if (data.current_editor) {
-                    // Backend sends editor_index as 0-based, but we need to handle both 0-based and 1-based
-                    let editorIndex = data.editor_index !== undefined && data.editor_index !== null ? data.editor_index : 0;
-                    const totalEditors = data.total_editors || this.currentState.totalEditors || this.currentState.selectedEditors.length;
-                    
-                    // Ensure editorIndex is 0-based for comparison (if backend sends 1-based, convert it)
-                    if (editorIndex > 0 && editorIndex >= totalEditors) {
-                      editorIndex = editorIndex - 1; // Convert 1-based to 0-based
-                    }
-                    
-                    // isLastEditor: 0-based index comparison
-                    const isLastEditor = editorIndex >= (totalEditors - 1);
-                    
-                    console.log('[ChatEditWorkflow] Next editor - Editor index calculation:', {
-                      editor_index: data.editor_index,
-                      normalizedIndex: editorIndex,
-                      totalEditors,
-                      isLastEditor,
-                      currentEditor: data.current_editor
-                    });
-                    
-                    stateUpdates.currentEditor = data.current_editor;
-                    stateUpdates.currentEditorIndex = editorIndex;
-                    stateUpdates.totalEditors = totalEditors;
-                    stateUpdates.isLastEditor = isLastEditor;
-                    
-                    // CRITICAL FIX: If we have multiple editors (> 1), it's sequential mode
-                    if (totalEditors > 1) {
-                      stateUpdates.isSequentialMode = true;
-                    }
-                  }
-                  
-                  // Apply all state updates at once
-                  if (Object.keys(stateUpdates).length > 0) {
-                    this.updateState({
-                      ...this.currentState,
-                      ...stateUpdates
-                    });
-                  }
-
-                  // Process paragraph edits
-                  if (data.paragraph_edits && Array.isArray(data.paragraph_edits)) {
-                    const allEditorNames = selectedIds.map(editorId => {
-                      return getEditorDisplayName(editorId);
-                    });
-                    
-                    const originalContent = data.original_content || this.currentState.originalContent || '';
-                    const originalParagraphs = originalContent ? splitIntoParagraphs(originalContent) : [];
-                    
-                    paragraphEdits = data.paragraph_edits.map((edit: any, arrayIndex: number) => {
-                      const existingTags = edit.tags || [];
-                      const existingEditorNames = new Set<string>(
-                        existingTags.map((tag: string) => {
-                          const match = tag.match(/^(.+?)\s*\(/);
-                          return match ? match[1].trim() : tag;
-                        })
-                      );
-                      
-                      const allTags = [...existingTags];
-                      allEditorNames.forEach(editorName => {
-                        const existingNamesArray = Array.from(existingEditorNames) as string[];
-                        if (!existingNamesArray.some((existing: string) => 
-                          existing.toLowerCase().includes(editorName.toLowerCase()) || 
-                          editorName.toLowerCase().includes(existing.toLowerCase())
-                        )) {
-                          allTags.push(`${editorName} (Reviewed)`);
-                        }
-                      });
-                      
-                      const paragraphIndex = (edit.index !== undefined && edit.index !== null) ? edit.index : arrayIndex;
-                      const originalText = (edit.original && edit.original.trim()) || (originalParagraphs.length > paragraphIndex && paragraphIndex >= 0 ? (originalParagraphs[paragraphIndex] && originalParagraphs[paragraphIndex].trim()) || '' : '');
-                      const editedText = (edit.edited && edit.edited.trim()) || '';
-                      const isIdentical = validateStringEquality(originalText, editedText);
-                      const autoApproved = edit.autoApproved !== undefined ? edit.autoApproved : isIdentical;
-                      const approved = autoApproved ? true : (edit.approved !== undefined ? edit.approved : null);
-                      
-                      // Process editorial_feedback with same structure as Guided Journey (always include all editor types)
-                      const editorial_feedback = {
-                        development: edit.editorial_feedback?.development || [],
-                        content: edit.editorial_feedback?.content || [],
-                        copy: edit.editorial_feedback?.copy || [],
-                        line: edit.editorial_feedback?.line || [],
-                        brand: edit.editorial_feedback?.brand || []
-                      };
-                      
-                      return {
-                        index: paragraphIndex,
-                        original: originalText,
-                        edited: editedText,
-                        tags: allTags,
-                        autoApproved: autoApproved,
-                        approved: approved,
-                        editorial_feedback: editorial_feedback,
-                        displayOriginal: originalText,
-                        displayEdited: editedText
-                      } as ParagraphEdit;
-                    });
-                    
-                    this.updateState({
-                      ...this.currentState,
-                      paragraphEdits: paragraphEdits,
-                      originalContent: data.original_content || this.currentState.originalContent,
-                      step: 'awaiting_approval'
-                    });
-                  }
-
-                  // Update content
-                  if (data.original_content) {
-                    this.updateState({
-                      ...this.currentState,
-                      originalContent: data.original_content
-                    });
-                  }
-
-                  if (data.final_revised) {
-                    finalRevisedContent = data.final_revised.trim();
-                  }
-
-                  // Process feedback
-                  if (data.combined_feedback) {
-                    combinedFeedback = data.combined_feedback.trim();
-                  }
-
-                  // Dispatch results for this editor
-                  this.dispatchResultsToChat('', selectedIds, selectedNames, combinedFeedback, finalRevisedContent, paragraphEdits);
-                }
-
-                // Handle errors
-                if (data.type === 'error') {
-                  throw new Error(data.error || 'Unknown error');
-                }
-              } catch (e) {
-                console.error('[ChatEditWorkflow] Error parsing SSE data:', e);
-              }
-            }
-          }
-        }
-      }
-    } catch (error) {
-      console.error('[ChatEditWorkflow] Error in nextEditor:', error);
-      const errorMessage: Message = {
-        role: 'assistant',
-        content: `⚠️ **Failed to proceed to next editor.** ${error instanceof Error ? error.message : 'Please try again.'}`,
-        timestamp: new Date()
-      };
-      this.messageSubject.next({ type: 'prompt', message: errorMessage });
-      this.updateState({
-        ...this.currentState,
-        step: 'awaiting_approval'
-      });
     }
   }
 }
